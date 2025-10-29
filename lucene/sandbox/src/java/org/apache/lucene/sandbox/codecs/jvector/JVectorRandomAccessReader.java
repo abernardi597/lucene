@@ -59,7 +59,7 @@ public class JVectorRandomAccessReader implements RandomAccessReader {
   }
 
   // TODO: bring back to override when upgrading jVector again
-  // @Override
+  @Override
   public long readLong() throws IOException {
     return indexInputDelegate.readLong();
   }
