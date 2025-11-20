@@ -626,7 +626,6 @@ public class JVectorWriter extends KnnVectorsWriter {
             new RandomAccessVectorValuesOverVectorValues(values);
         newPq = newPq.refine(randomAccessVectorValues);
       }
-      newPq.encodeAll(ravv);
       pqVectors = (PQVectors) newPq.encodeAll(ravv);
     } else if (ravv.size() >= minimumBatchSizeForQuantization) {
       // No pre-existing codebooks, check if we have enough vectors to trigger quantization
@@ -799,7 +798,8 @@ public class JVectorWriter extends KnnVectorsWriter {
             ord ->
                 CompletableFuture.runAsync(
                     () -> graphIndexBuilder.addGraphNode(ord, vv.get().getVector(ord)), executor))
-        .forEach(CompletableFuture::join);
+        .reduce((a, b) -> a.runAfterBoth(b, () -> {}))
+        .ifPresent(CompletableFuture::join);
     graphIndexBuilder.cleanup();
     graphIndex = (OnHeapGraphIndex) graphIndexBuilder.getGraph();
 
