@@ -334,20 +334,6 @@ public class JVectorWriter extends KnnVectorsWriter {
           segmentWriteState.segmentInfo.getId(),
           segmentWriteState.segmentSuffix);
       final long startOffset = indexOutput.getFilePointer();
-      if (graph.size() == 0) {
-        CodecUtil.writeFooter(indexOutput);
-        return new VectorIndexFieldMetadata(
-            fieldInfo.number,
-            fieldInfo.getVectorEncoding(),
-            JVectorFormat.toJVectorSimilarity(fieldInfo.getVectorSimilarityFunction()),
-            randomAccessVectorValues.dimension(),
-            0,
-            0,
-            0,
-            0,
-            degreeOverflow,
-            graphNodeIdToDocMap);
-      }
       final var writerBuilder =
           new OnDiskSequentialGraphIndexWriter.Builder(graph, jVectorIndexWriter)
               .with(new InlineVectors(randomAccessVectorValues.dimension()));
@@ -601,8 +587,13 @@ public class JVectorWriter extends KnnVectorsWriter {
       ord += 1;
     }
 
-    // Make a RandomAccessVectorValues instance using the new graph ordinals
     final int totalLiveDocsCount = ord;
+    if (totalLiveDocsCount == 0) {
+      // Avoid writing an empty graph
+      return;
+    }
+
+    // Make a RandomAccessVectorValues instance using the new graph ordinals
     final var ravv =
         new RandomAccessMergedFloatVectorValues(
             totalLiveDocsCount,
@@ -787,6 +778,7 @@ public class JVectorWriter extends KnnVectorsWriter {
       FieldInfo fieldInfo,
       String segmentName,
       Executor executor) {
+    assert randomAccessVectorValues.size() > 0 : "Cannot build empty graph";
     final GraphIndexBuilder graphIndexBuilder =
         new GraphIndexBuilder(
             buildScoreProvider,
