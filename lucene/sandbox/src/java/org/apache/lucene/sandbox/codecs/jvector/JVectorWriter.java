@@ -29,6 +29,7 @@ import io.github.jbellis.jvector.graph.disk.feature.Feature;
 import io.github.jbellis.jvector.graph.disk.feature.FeatureId;
 import io.github.jbellis.jvector.graph.disk.feature.InlineVectors;
 import io.github.jbellis.jvector.graph.similarity.BuildScoreProvider;
+import io.github.jbellis.jvector.quantization.MutablePQVectors;
 import io.github.jbellis.jvector.quantization.PQVectors;
 import io.github.jbellis.jvector.quantization.ProductQuantization;
 import io.github.jbellis.jvector.vector.VectorSimilarityFunction;
@@ -176,7 +177,8 @@ public class JVectorWriter extends KnnVectorsWriter {
               + "This can provides much greater savings in storage and memory";
       throw new UnsupportedOperationException(errorMessage);
     }
-    FieldWriter newField = new FieldWriter(fieldInfo);
+    final int M = numberOfSubspacesPerVectorSupplier.applyAsInt(fieldInfo.getVectorDimension());
+    final FieldWriter newField = new FieldWriter(fieldInfo, minimumBatchSizeForQuantization, M);
 
     fields.add(newField);
     return newField;
@@ -216,17 +218,15 @@ public class JVectorWriter extends KnnVectorsWriter {
       }
       final RandomAccessVectorValues randomAccessVectorValues = field.toRandomAccessVectorValues();
       final BuildScoreProvider buildScoreProvider;
-      final PQVectors pqVectors;
+      final PQVectors pqVectors = field.getCompressedVectors();
       final FieldInfo fieldInfo = field.fieldInfo;
-      if (randomAccessVectorValues.size() >= minimumBatchSizeForQuantization) {
-        pqVectors = getPQVectors(randomAccessVectorValues, fieldInfo);
+      if (pqVectors != null) {
         buildScoreProvider =
             BuildScoreProvider.pqBuildScoreProvider(
                 JVectorFormat.toJVectorSimilarity(fieldInfo.getVectorSimilarityFunction()),
                 pqVectors);
       } else {
         // Not enough vectors for quantization; use full precision vectors instead
-        pqVectors = null;
         buildScoreProvider =
             BuildScoreProvider.randomAccessScoreProvider(
                 randomAccessVectorValues,
@@ -470,10 +470,18 @@ public class JVectorWriter extends KnnVectorsWriter {
     private final List<VectorFloat<?>> vectors = new ArrayList<>();
     private final DocsWithFieldSet docIds;
 
-    FieldWriter(FieldInfo fieldInfo) {
+    // PQ fields
+    private final int pqThreshold;
+    private final int pqSubspaceCount;
+    private MutablePQVectors pqVectors;
+
+    FieldWriter(FieldInfo fieldInfo, int pqThreshold, int pqSubspaceCount) {
       /** For creating a new field from a flat field vectors writer. */
       this.fieldInfo = fieldInfo;
       this.docIds = new DocsWithFieldSet();
+      this.pqThreshold = pqThreshold;
+      this.pqSubspaceCount = pqSubspaceCount;
+      this.pqVectors = null;
     }
 
     @Override
@@ -485,7 +493,29 @@ public class JVectorWriter extends KnnVectorsWriter {
                 + "\" appears more than once in this document (only one value is allowed per field)");
       }
       docIds.add(docID);
-      vectors.add(VECTOR_TYPE_SUPPORT.createFloatVector(copyValue(vectorValue)));
+      final var vector = VECTOR_TYPE_SUPPORT.createFloatVector(copyValue(vectorValue));
+      vectors.add(vector);
+
+      if (pqVectors != null) {
+        pqVectors.encodeAndSet(vectors.size() - 1, vector);
+      } else if (vectors.size() > pqThreshold) {
+        final boolean globallyCenter =
+            switch (fieldInfo.getVectorSimilarityFunction()) {
+              case EUCLIDEAN -> true;
+              case COSINE, DOT_PRODUCT, MAXIMUM_INNER_PRODUCT -> false;
+            };
+        final int pqCenterCount = Math.min(256, vectors.size());
+        final var pq =
+            ProductQuantization.compute(
+                toRandomAccessVectorValues(),
+                pqSubspaceCount,
+                pqCenterCount,
+                globallyCenter);
+        pqVectors = new MutablePQVectors(pq);
+        for (int i = 0; i < vectors.size(); ++i) {
+          pqVectors.encodeAndSet(i, vectors.get(i));
+        }
+      }
     }
 
     @Override
@@ -495,6 +525,10 @@ public class JVectorWriter extends KnnVectorsWriter {
 
     public RandomAccessVectorValues toRandomAccessVectorValues() {
       return new ListRandomAccessVectorValues(vectors, fieldInfo.getVectorDimension());
+    }
+
+    public PQVectors getCompressedVectors() {
+      return pqVectors;
     }
 
     @Override
