@@ -181,7 +181,16 @@ public class JVectorWriter extends KnnVectorsWriter {
       throw new UnsupportedOperationException(errorMessage);
     }
     final int M = numberOfSubspacesPerVectorSupplier.applyAsInt(fieldInfo.getVectorDimension());
-    final FieldWriter newField = new FieldWriter(fieldInfo, minimumBatchSizeForQuantization, M);
+    final FieldWriter newField =
+        new FieldWriter(
+          fieldInfo,
+          maxConn,
+          beamWidth,
+          degreeOverflow,
+          alpha,
+          hierarchyEnabled,
+          minimumBatchSizeForQuantization,
+          M);
 
     fields.add(newField);
     return newField;
@@ -220,13 +229,9 @@ public class JVectorWriter extends KnnVectorsWriter {
         ordinalMapper = null;
       }
       final RandomAccessVectorValues randomAccessVectorValues = field.toRandomAccessVectorValues();
-      final BuildScoreProvider buildScoreProvider = field.buildScoreProvider;
       final PQVectors pqVectors = field.getCompressedVectors();
-      final FieldInfo fieldInfo = field.fieldInfo;
-
+      final ImmutableGraphIndex graph = field.getGraphIndex();
       final GraphNodeIdToDocMap graphNodeIdToDocMap = new GraphNodeIdToDocMap(newDocIds);
-      final var graph =
-          getGraph(buildScoreProvider, randomAccessVectorValues, fieldInfo, Runnable::run);
       writeField(
           field.fieldInfo,
           randomAccessVectorValues,
@@ -461,6 +466,7 @@ public class JVectorWriter extends KnnVectorsWriter {
     private final List<VectorFloat<?>> vectors;
     private final DocsWithFieldSet docIds;
 
+    private GraphIndexBuilder indexBuilder;
     private final DelegatingBuildScoreProvider buildScoreProvider;
 
     // PQ fields
@@ -468,7 +474,15 @@ public class JVectorWriter extends KnnVectorsWriter {
     private final int pqSubspaceCount;
     private MutablePQVectors pqVectors;
 
-    FieldWriter(FieldInfo fieldInfo, int pqThreshold, int pqSubspaceCount) {
+    FieldWriter(
+        FieldInfo fieldInfo,
+        int maxConn,
+        int beamWidth,
+        float degreeOverflow,
+        float alpha,
+        boolean hierarchyEnabled,
+        int pqThreshold,
+        int pqSubspaceCount) {
       /** For creating a new field from a flat field vectors writer. */
       this.fieldInfo = fieldInfo;
       this.vectors = new ArrayList<>();
@@ -481,6 +495,15 @@ public class JVectorWriter extends KnnVectorsWriter {
               BuildScoreProvider.randomAccessScoreProvider(
                   toRandomAccessVectorValues(),
                   similarityFunction));
+      this.indexBuilder =
+          new GraphIndexBuilder(
+              buildScoreProvider,
+              fieldInfo.getVectorDimension(),
+              maxConn,
+              beamWidth,
+              degreeOverflow,
+              alpha,
+              hierarchyEnabled);
 
       this.pqThreshold = pqThreshold;
       this.pqSubspaceCount = pqSubspaceCount;
@@ -495,12 +518,13 @@ public class JVectorWriter extends KnnVectorsWriter {
                 + fieldInfo.name
                 + "\" appears more than once in this document (only one value is allowed per field)");
       }
+      final int ord = vectors.size();
       docIds.add(docID);
       final var vector = VECTOR_TYPE_SUPPORT.createFloatVector(copyValue(vectorValue));
       vectors.add(vector);
 
       if (pqVectors != null) {
-        pqVectors.encodeAndSet(vectors.size() - 1, vector);
+        pqVectors.encodeAndSet(ord, vector);
       } else if (vectors.size() > pqThreshold) {
         final boolean globallyCenter =
             switch (fieldInfo.getVectorSimilarityFunction()) {
@@ -523,7 +547,10 @@ public class JVectorWriter extends KnnVectorsWriter {
             JVectorFormat.toJVectorSimilarity(fieldInfo.getVectorSimilarityFunction());
         buildScoreProvider.setDelegate(
             BuildScoreProvider.pqBuildScoreProvider(similarityFunction, pqVectors));
+        indexBuilder = GraphIndexBuilder.rescore(indexBuilder, buildScoreProvider);
       }
+
+      indexBuilder.addGraphNode(ord, buildScoreProvider.searchProviderFor(vector));
     }
 
     @Override
@@ -537,6 +564,11 @@ public class JVectorWriter extends KnnVectorsWriter {
 
     public PQVectors getCompressedVectors() {
       return pqVectors;
+    }
+
+    public ImmutableGraphIndex getGraphIndex() {
+      indexBuilder.cleanup();
+      return indexBuilder.getGraph();
     }
 
     @Override
