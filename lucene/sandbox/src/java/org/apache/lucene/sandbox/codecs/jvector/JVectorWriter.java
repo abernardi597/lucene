@@ -652,7 +652,7 @@ public class JVectorWriter extends KnnVectorsWriter {
     if (ravv.size() >= minimumBatchSizeForQuantization) {
       final int M = numberOfSubspacesPerVectorSupplier.applyAsInt(ravv.dimension());
       final ProductQuantization newPQ = trainPQ(ravv, M, fieldInfo.getVectorSimilarityFunction());
-      pqVectors = newPQ.encodeAll(ravv, SIMD_POOL);
+      pqVectors = (PQVectors) newPQ.encodeAll(ravv);
     } else {
       pqVectors = null;
     }
